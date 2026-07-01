@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 🔑 No built-in AI key. Each user adds their own free API key inside the -->
+	<!-- app (the onboarding screen on first launch, or Settings ▸ Thêm key). -->
+	<!-- The app guides them to get one for free; nothing is baked in here. -->
+
+	<!-- ☁️ Firebase cloud sync (optional). Create a free Firebase project, -->
+	<!-- enable Email/Password sign-in + Firestore, then paste below: -->
+	<!--   • Project ID:  Firebase Console ▸ Project settings ▸ General -->
+	<!--   • Web API key: same page (Web API Key) -->
+	<key>FIREBASE_PROJECT_ID</key>
+	<string>YOUR_FIREBASE_PROJECT_ID</string>
+	<key>FIREBASE_API_KEY</key>
+	<string>YOUR_FIREBASE_API_KEY</string>
+</dict>
+</plist>
