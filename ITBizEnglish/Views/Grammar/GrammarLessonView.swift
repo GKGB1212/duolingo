@@ -15,18 +15,32 @@ import SwiftUI
 struct GrammarLessonView: View {
     let route: GrammarRoute
     @Bindable var store: GrammarStore
+    /// Missed questions from practice are banked here.
+    var mistakes: GrammarMistakeStore
+    /// Lesson ratings ("this lesson is off") are logged here.
+    var feedback: GrammarFeedbackStore
 
     @State private var speech = SpeechSynthesizer()
     @State private var savedID: UUID?
     @State private var showSetup = false
     @State private var practiceRun: GrammarPracticeRun?
 
+    // Regeneration + feedback.
+    @State private var liveLesson: GrammarLesson?   // overrides route.lesson once regenerated
+    @State private var regenerating = false
+    @State private var showFeedback = false
+
     // Recursive "related grammar" navigation.
     @State private var relatedRoute: GrammarRoute?
     @State private var generatingRelated = false
     @State private var relatedAlert: DuoAlertData?
 
-    private var lesson: GrammarLesson { route.lesson }
+    /// The lesson currently shown — the regenerated one if any, else the route's.
+    private var lesson: GrammarLesson { liveLesson ?? route.lesson }
+    /// A route carrying the *current* lesson (so practice uses regenerated content).
+    private var currentRoute: GrammarRoute {
+        GrammarRoute(pattern: route.pattern, request: route.request, lesson: lesson, savedID: route.savedID)
+    }
     private var isSaved: Bool { savedID != nil || store.contains(pattern: route.pattern) }
 
     var body: some View {
@@ -53,6 +67,9 @@ struct GrammarLessonView: View {
             if generatingRelated {
                 GrammarLoadingOverlay(pattern: relatedPatternInFlight)
             }
+            if regenerating {
+                GrammarLoadingOverlay(pattern: route.pattern)
+            }
         }
         .navigationTitle("Bài học")
         .navigationBarTitleDisplayMode(.inline)
@@ -63,23 +80,51 @@ struct GrammarLessonView: View {
                         .foregroundStyle(isSaved ? .brand : .duoWolf)
                 }
             }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button { regenerate() } label: {
+                        Label("Tạo lại bài học", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    Button { markGoodLesson() } label: {
+                        Label("Bài học tốt 👍", systemImage: "hand.thumbsup")
+                    }
+                    Button(role: .destructive) { showFeedback = true } label: {
+                        Label("Báo lỗi bài học", systemImage: "flag")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle").foregroundStyle(.duoWolf)
+                }
+                .disabled(regenerating)
+            }
         }
         .navigationDestination(item: $practiceRun) { run in
-            GrammarPracticeView(route: route, exercises: run.exercises, store: store,
-                                savedID: savedIDForPractice, setID: run.setID)
+            GrammarPracticeView(route: currentRoute, exercises: run.exercises, store: store,
+                                savedID: savedIDForPractice, setID: run.setID,
+                                mistakes: mistakes, sourceLabel: run.contextLabel)
+        }
+        .sheet(isPresented: $showFeedback) {
+            GrammarFeedbackSheet(pattern: route.pattern) { reasons, note, regen in
+                feedback.add(GrammarLessonFeedback(pattern: route.pattern, positive: false,
+                                                   reasons: reasons, note: note))
+                if regen {
+                    let extra = [reasons.joined(separator: ", "), note]
+                        .filter { !$0.isEmpty }.joined(separator: ". ")
+                    regenerate(extra: extra.isEmpty ? "" : "Sửa các vấn đề sau ở bản trước: \(extra)")
+                }
+            }
         }
         .sheet(isPresented: $showSetup) {
             GrammarPracticeSetupSheet(pattern: route.pattern, request: route.request,
                                       defaultExercises: lesson.exercises, store: store,
-                                      savedID: savedIDForPractice) { exercises, _, setID in
+                                      savedID: savedIDForPractice) { exercises, label, setID in
                 // Let the sheet finish dismissing before pushing the runner.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    practiceRun = GrammarPracticeRun(exercises: exercises, setID: setID)
+                    practiceRun = GrammarPracticeRun(exercises: exercises, setID: setID, contextLabel: label)
                 }
             }
         }
         .navigationDestination(item: $relatedRoute) { r in
-            GrammarLessonView(route: r, store: store)
+            GrammarLessonView(route: r, store: store, mistakes: mistakes, feedback: feedback)
         }
         .duoAlert($relatedAlert)
         .onAppear {
@@ -433,6 +478,39 @@ struct GrammarLessonView: View {
 
     @State private var relatedPatternInFlight = ""
 
+    /// Regenerates the whole lesson (optionally steering the model with `extra`
+    /// guidance from a bad-lesson report), updates the saved copy in place, and
+    /// swaps the view to the fresh content.
+    private func regenerate(extra: String = "") {
+        guard !regenerating else { return }
+        Haptics.tap()
+        regenerating = true
+        let req = [route.request, extra].filter { !$0.isEmpty }.joined(separator: "; ")
+        Task {
+            do {
+                let l = try await GrammarAIService().generate(pattern: route.pattern, request: req)
+                await MainActor.run {
+                    regenerating = false
+                    withAnimation { liveLesson = l }
+                    savedID = store.save(l, pattern: route.pattern, request: route.request)
+                }
+            } catch {
+                await MainActor.run {
+                    regenerating = false
+                    let msg = (error as? LocalizedError)?.errorDescription ?? "Thử lại nhé."
+                    relatedAlert = DuoAlertData(title: "Không tạo lại được bài học", message: msg)
+                }
+            }
+        }
+    }
+
+    private func markGoodLesson() {
+        Haptics.tap()
+        feedback.add(GrammarLessonFeedback(pattern: route.pattern, positive: true))
+        relatedAlert = DuoAlertData(title: "Cảm ơn bạn! 🎉",
+                                    message: "Phản hồi giúp cải thiện chất lượng các bài học.")
+    }
+
     private func openRelated(_ pattern: String) {
         guard !generatingRelated else { return }
         Haptics.tap()
@@ -545,6 +623,84 @@ struct GrammarSummaryCard: View {
     }
 }
 
+// MARK: - Lesson feedback sheet
+
+/// A short Duolingo-style form for reporting a poor lesson. The chosen reasons
+/// can be fed straight back into a regeneration to fix the specific complaint.
+struct GrammarFeedbackSheet: View {
+    let pattern: String
+    /// (reasons, freeform note, alsoRegenerate)
+    let onSubmit: (_ reasons: [String], _ note: String, _ regenerate: Bool) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var selected: Set<String> = []
+    @State private var note = ""
+
+    static let reasons = ["Ngữ pháp sai", "Ví dụ không tự nhiên", "Khó hiểu",
+                          "Thiếu ví dụ", "Dịch chưa đúng", "Khác"]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                HStack(spacing: Theme.Spacing.sm) {
+                    Image(systemName: "flag.fill").font(.title2).foregroundStyle(.duoRed)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Báo lỗi bài học").font(.title3.weight(.heavy)).foregroundStyle(.duoInk)
+                        Text(pattern).font(.caption.weight(.bold)).foregroundStyle(.duoWolf).lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }
+
+                Text("BÀI HỌC CHƯA ỔN Ở ĐÂU?").font(.caption.weight(.heavy)).foregroundStyle(.duoWolf)
+                FlowLayout(spacing: 8) {
+                    ForEach(Self.reasons, id: \.self) { r in
+                        let on = selected.contains(r)
+                        Button {
+                            Haptics.tap()
+                            if on { selected.remove(r) } else { selected.insert(r) }
+                        } label: {
+                            Text(r)
+                                .font(.subheadline.weight(.bold)).foregroundStyle(on ? .white : .duoInk)
+                                .padding(.horizontal, 12).padding(.vertical, 8)
+                                .background(Capsule().fill(on ? AnyShapeStyle(Color.duoRed) : AnyShapeStyle(Color.duoPolar)))
+                                .overlay(Capsule().strokeBorder(on ? Color.duoRedEdge : Color.duoSwan, lineWidth: 2))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                TextField("Mô tả thêm (tuỳ chọn)…", text: $note, axis: .vertical)
+                    .lineLimit(1...4).font(.callout).foregroundStyle(.duoInk)
+                    .padding(.horizontal, 12).padding(.vertical, 10)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.duoPolar))
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.duoSwan, lineWidth: 2))
+
+                Button {
+                    onSubmit(Array(selected), note.trimmingCharacters(in: .whitespaces), true)
+                    dismiss()
+                } label: {
+                    Label("Gửi & tạo lại bài học", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .buttonStyle(.duoPrimary(enabled: true))
+                .padding(.top, Theme.Spacing.xs)
+
+                Button {
+                    onSubmit(Array(selected), note.trimmingCharacters(in: .whitespaces), false)
+                    dismiss()
+                } label: {
+                    Text("Chỉ gửi phản hồi")
+                        .font(.subheadline.weight(.heavy)).foregroundStyle(.duoWolf)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(Theme.Spacing.lg)
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+}
+
 // MARK: - Practice setup (choose a context + exercise types, generate)
 
 /// Carries a chosen exercise set into `navigationDestination` for the runner.
@@ -553,6 +709,8 @@ struct GrammarPracticeRun: Identifiable, Hashable {
     var exercises: [GrammarExercise]
     /// The saved-set id (so the runner can record a score against it).
     var setID: UUID? = nil
+    /// The chosen context label, stored on any mistakes recorded during the run.
+    var contextLabel: String = "Bài học"
 }
 
 /// Shown before practice: pick a real-life CONTEXT (incl. IT), pick which

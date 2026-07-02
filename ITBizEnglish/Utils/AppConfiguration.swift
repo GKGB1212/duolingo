@@ -279,6 +279,14 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(lookupBubbleEnabled, forKey: Self.lookupBubbleKey) }
     }
 
+    /// Whether a freshly generated grammar lesson runs an extra low-temperature
+    /// AI pass that double-checks the exercise answer keys before showing them.
+    /// Costs one more API call per generation; users on tight quotas can turn it
+    /// off (structural validation still runs either way).
+    var verifyGrammar: Bool {
+        didSet { UserDefaults.standard.set(verifyGrammar, forKey: Self.grammarVerifyKey) }
+    }
+
     /// Summary of the credential used for the most recent successful AI call,
     /// e.g. "Groq · llama-3.3-70b · …a1b2" — transient, for display only.
     var lastUsedSummary: String?
@@ -290,6 +298,7 @@ final class AppSettings {
     @ObservationIgnored private static let themeKey = "itbiz.theme.v1"
     @ObservationIgnored private static let voiceKey = "itbiz.voiceID.v1"
     @ObservationIgnored private static let lookupBubbleKey = "itbiz.lookupBubble.v1"
+    @ObservationIgnored private static let grammarVerifyKey = "itbiz.grammarVerify.v1"
 
     private init() {
         let raw = UserDefaults.standard.string(forKey: Self.appearanceKey) ?? Appearance.system.rawValue
@@ -301,6 +310,10 @@ final class AppSettings {
         lookupBubbleEnabled = UserDefaults.standard.object(forKey: Self.lookupBubbleKey) == nil
             ? true
             : UserDefaults.standard.bool(forKey: Self.lookupBubbleKey)
+        // Default ON — answer-key verification protects learner trust.
+        verifyGrammar = UserDefaults.standard.object(forKey: Self.grammarVerifyKey) == nil
+            ? true
+            : UserDefaults.standard.bool(forKey: Self.grammarVerifyKey)
 
         // Load credentials, migrating the old [String] of Gemini keys if present.
         if let data = UserDefaults.standard.data(forKey: Self.credsKey),

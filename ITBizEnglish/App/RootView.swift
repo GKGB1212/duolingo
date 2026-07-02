@@ -22,6 +22,8 @@ struct RootView: View {
     @State private var practice = PracticeStore()       // self-translate sets
     @State private var chatHistory = ChatHistoryStore() // finished chat sessions
     @State private var grammar = GrammarStore()         // AI grammar lessons
+    @State private var grammarMistakes = GrammarMistakeStore() // banked wrong grammar answers
+    @State private var grammarFeedback = GrammarFeedbackStore() // lesson ratings (local)
     @State private var settings = AppSettings.shared    // appearance + API keys
 
     @State private var tab: RootTab = .chat
@@ -49,8 +51,8 @@ struct RootView: View {
                 tabContent(.courses)       { NavigationStack { DecksHomeView(store: decks) } }
                 tabContent(.songs)         { SongSearchView() }
                 tabContent(.selfTranslate) { NavigationStack { PracticeHomeView(store: practice, decks: decks) } }
-                tabContent(.grammar)       { NavigationStack { GrammarLibraryView(store: grammar) } }
-                tabContent(.settings)      { NavigationStack { SettingsView(settings: settings, decks: decks, practice: practice, chatHistory: chatHistory, flashcards: flashcards, grammar: grammar) } }
+                tabContent(.grammar)       { NavigationStack { GrammarLibraryView(store: grammar, mistakes: grammarMistakes, feedback: grammarFeedback) } }
+                tabContent(.settings)      { NavigationStack { SettingsView(settings: settings, decks: decks, practice: practice, chatHistory: chatHistory, flashcards: flashcards, grammar: grammar, grammarMistakes: grammarMistakes) } }
             }
             DuoTabBar(selection: $tab, showMore: $showMore)
         }
@@ -71,7 +73,7 @@ struct RootView: View {
             guard phase == .background, CloudAuth.shared.isSignedIn else { return }
             Task {
                 try? await CloudSync.upload(decks: decks, practice: practice, chat: chatHistory,
-                                            flashcards: flashcards, songs: .shared, grammar: grammar, settings: settings)
+                                            flashcards: flashcards, songs: .shared, grammar: grammar, grammarMistakes: grammarMistakes, settings: settings)
             }
         }
         // Right after an interactive login, pull the cloud copy down once.
@@ -79,7 +81,7 @@ struct RootView: View {
             guard CloudAuth.shared.pendingInitialSync else { return }
             CloudAuth.shared.pendingInitialSync = false
             try? await CloudSync.download(decks: decks, practice: practice, chat: chatHistory,
-                                          flashcards: flashcards, songs: .shared, grammar: grammar, settings: settings)
+                                          flashcards: flashcards, songs: .shared, grammar: grammar, grammarMistakes: grammarMistakes, settings: settings)
         }
     }
 
@@ -329,6 +331,7 @@ struct SettingsView: View {
     var chatHistory: ChatHistoryStore
     var flashcards: FlashcardStore
     var grammar: GrammarStore
+    var grammarMistakes: GrammarMistakeStore
     @State private var newProvider: LLMProvider = .gemini
     @State private var newKey = ""
     @State private var showKeyGuide = false
@@ -359,6 +362,7 @@ struct SettingsView: View {
                     themeCard
                     voiceCard
                     lookupBubbleCard
+                    grammarVerifyCard
                     backupCard
                     cloudCard
                     if let last = settings.lastUsedSummary { lastUsedCard(last) }
@@ -422,7 +426,7 @@ struct SettingsView: View {
         do {
             let url = try BackupService.writeTempFile(
                 decks: decks, practice: practice, chat: chatHistory,
-                flashcards: flashcards, songs: .shared, grammar: grammar, settings: settings)
+                flashcards: flashcards, songs: .shared, grammar: grammar, grammarMistakes: grammarMistakes, settings: settings)
             shareItem = ShareItem(url: url)
         } catch {
             backupIsError = true
@@ -436,7 +440,7 @@ struct SettingsView: View {
             do {
                 let backup = try BackupService.restore(
                     from: url, decks: decks, practice: practice, chat: chatHistory,
-                    flashcards: flashcards, songs: .shared, grammar: grammar, settings: settings)
+                    flashcards: flashcards, songs: .shared, grammar: grammar, grammarMistakes: grammarMistakes, settings: settings)
                 backupIsError = false
                 backupMessage = "Đã nhập: \(backup.summary)."
             } catch {
@@ -553,12 +557,12 @@ struct SettingsView: View {
         do {
             if upload {
                 try await CloudSync.upload(decks: decks, practice: practice, chat: chatHistory,
-                                           flashcards: flashcards, songs: .shared, grammar: grammar, settings: settings)
+                                           flashcards: flashcards, songs: .shared, grammar: grammar, grammarMistakes: grammarMistakes, settings: settings)
                 cloudIsError = false
                 cloudMessage = "Đã tải toàn bộ dữ liệu lên đám mây."
             } else {
                 let existed = try await CloudSync.download(decks: decks, practice: practice, chat: chatHistory,
-                                                           flashcards: flashcards, songs: .shared, grammar: grammar, settings: settings)
+                                                           flashcards: flashcards, songs: .shared, grammar: grammar, grammarMistakes: grammarMistakes, settings: settings)
                 cloudIsError = !existed
                 cloudMessage = existed ? "Đã tải dữ liệu từ đám mây về máy này."
                                        : "Trên đám mây chưa có dữ liệu. Hãy “Tải lên” trước."
@@ -674,6 +678,21 @@ struct SettingsView: View {
                 }
                 .tint(.brand)
                 Text("Bóng nổi quanh màn hình — chạm để tra nhanh Việt ⇄ Anh, lưu vào bộ từ hoặc copy. Kéo bóng tới mép nào cũng được.")
+                    .font(.caption.weight(.medium)).foregroundStyle(.duoWolf)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private var grammarVerifyCard: some View {
+        settingsCard("Kiểm tra ngữ pháp bằng AI", icon: "checkmark.shield.fill", tint: .duoIndigo) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                Toggle(isOn: $settings.verifyGrammar) {
+                    Text("Rà soát đáp án trước khi hiện")
+                        .font(.subheadline.weight(.bold)).foregroundStyle(.duoInk)
+                }
+                .tint(.brand)
+                Text("Khi tạo bài ngữ pháp, AI sẽ rà lại đáp án các bài tập để tránh dạy sai. Tốn thêm 1 lượt gọi mỗi lần tạo — tắt đi nếu muốn tiết kiệm quota (vẫn luôn kiểm tra cấu trúc bài tập).")
                     .font(.caption.weight(.medium)).foregroundStyle(.duoWolf)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }

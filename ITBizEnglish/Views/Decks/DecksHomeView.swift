@@ -111,6 +111,7 @@ struct DeckDashboardView: View {
     @State private var showLearn = false
     @State private var showReview = false
     @State private var showDifficult = false
+    @State private var showPreview = false
     @State private var showGame = false
     @State private var matchLaunch: MatchLaunch?
     @State private var showGamePicker = false
@@ -175,6 +176,9 @@ struct DeckDashboardView: View {
         }
         .fullScreenCover(isPresented: $showDifficult) {
             LearningSessionView(store: store, deckID: deckID, mode: .difficult)
+        }
+        .fullScreenCover(isPresented: $showPreview) {
+            DeckPreviewView(store: store, deckID: deckID)
         }
         .fullScreenCover(isPresented: $showGame) {
             DeckGameView(store: store, deckID: deckID)
@@ -294,12 +298,19 @@ struct DeckDashboardView: View {
 
     private func wordList(_ deck: WordDeck) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            HStack {
+            HStack(spacing: Theme.Spacing.sm) {
                 Text("TỪ VỰNG").font(.caption.weight(.heavy)).foregroundStyle(.duoWolf)
-                Spacer()
                 if deck.difficultCount > 0 {
                     Label("\(deck.difficultCount) từ khó", systemImage: "star.fill")
                         .font(.caption2.weight(.bold)).foregroundStyle(.duoGold)
+                }
+                Spacer()
+                if !deck.words.isEmpty {
+                    Button { showPreview = true } label: {
+                        Label("Xem trước", systemImage: "rectangle.stack.fill")
+                            .font(.caption.weight(.heavy)).foregroundStyle(.duoBlue)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             VStack(spacing: 0) {

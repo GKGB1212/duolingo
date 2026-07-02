@@ -106,12 +106,17 @@ struct GrammarAIService {
         }
         userText += "\nBuild the complete Duolingo-style lesson JSON now."
 
-        let content = try await LLMClient.generateJSON(system: systemPrompt, user: userText, temperature: 0.85)
+        // Lower temperature than before: the same call produces the answer keys,
+        // so less randomness means more reliable "correct" answers (variety still
+        // comes from the "make it fresh every time" instruction + related grammar).
+        let content = try await LLMClient.generateJSON(system: systemPrompt, user: userText, temperature: 0.6)
         guard let data = content.data(using: .utf8),
-              let lesson = try? JSONDecoder().decode(GrammarLesson.self, from: data),
+              var lesson = try? JSONDecoder().decode(GrammarLesson.self, from: data),
               lesson.isUsable else {
             throw TranslationError.decoding
         }
+        // Validate (and optionally AI-verify) exercises before they can be shown.
+        lesson.exercises = await sanitizeAndVerify(pattern: p, exercises: lesson.exercises)
         return lesson
     }
 
@@ -151,16 +156,96 @@ struct GrammarAIService {
         if !types.isEmpty {
             userText += "\nUse ONLY these exercise \"type\" values (spread them across the \(n) items): \(types.joined(separator: ", "))."
         }
-        let content = try await LLMClient.generateJSON(system: exercisesSystemPrompt, user: userText, temperature: 0.95)
+        let content = try await LLMClient.generateJSON(system: exercisesSystemPrompt, user: userText, temperature: 0.55)
         guard let data = content.data(using: .utf8),
               let ex = try? JSONDecoder().decode(ExercisesWrapper.self, from: data).exercises,
               !ex.isEmpty else {
             throw TranslationError.decoding
         }
-        return ex
+        let checked = await sanitizeAndVerify(pattern: p, exercises: ex)
+        guard !checked.isEmpty else { throw TranslationError.decoding }
+        return checked
     }
 
     private struct ExercisesWrapper: Decodable { let exercises: [GrammarExercise] }
+
+    // MARK: - Exercise validation & verification
+
+    /// Always structurally sanitizes exercises (dropping/repairing malformed
+    /// items); then, when the user has answer-key verification enabled and there
+    /// are objective items, runs a low-temperature AI check. Best-effort: the
+    /// verification pass never blocks a lesson — any failure returns the
+    /// structurally-clean set.
+    private func sanitizeAndVerify(pattern: String, exercises: [GrammarExercise]) async -> [GrammarExercise] {
+        let cleaned = exercises.sanitized()
+        guard AppSettings.shared.verifyGrammar,
+              cleaned.contains(where: { !$0.isOpenEnded }) else { return cleaned }
+        return await verify(pattern: pattern, exercises: cleaned)
+    }
+
+    private let verifySystemPrompt = """
+    You are a meticulous English teacher and test editor. You are given a JSON array of grammar practice exercises for a Vietnamese learner. Your ONLY job is to make sure each item's ANSWER KEY is correct and its English is natural — you are proof-reading, not rewriting.
+
+    Rules:
+    - Keep the SAME number of items in the SAME order, each with the SAME "type".
+    - For option-based items (multipleChoice, fillBlank, enToVi, chooseBetter, findMistake, conversation): set "answerIndex" to the 0-based index of the genuinely correct option. If an option's English is wrong or unnatural, you may fix that option's text, but keep the same number of options.
+    - For word-order items (wordOrder, viToEn): set "answer" to the correct, natural English sentence and "words" to that sentence's tokens.
+    - Fix "explanation" only if it is factually wrong (keep it short, in Vietnamese).
+    - Leave writeSentence and miniChallenge items unchanged.
+    - Keep Vietnamese text in Vietnamese and English text in English. Do NOT invent new exercise types.
+    - If an item is broken beyond repair, add "drop": true to it.
+
+    Respond with ONLY a raw JSON object {"exercises":[ ... ]}. No markdown fences, no extra text.
+    """
+
+    /// Runs the low-temperature answer-key verification pass. Returns the
+    /// corrected, re-sanitized set, or the input unchanged on any problem.
+    func verify(pattern: String, exercises: [GrammarExercise]) async -> [GrammarExercise] {
+        guard exercises.contains(where: { !$0.isOpenEnded }) else { return exercises }
+        guard let payload = try? JSONEncoder().encode(VerifyExercisesWrapper(exercises: exercises)),
+              let json = String(data: payload, encoding: .utf8) else { return exercises }
+
+        let userText = """
+        Grammar pattern being taught: "\(pattern)".
+        Exercises JSON to verify (keep the order and the count exactly):
+        \(json)
+        Return the corrected {"exercises":[...]} now.
+        """
+        do {
+            let content = try await LLMClient.generateJSON(system: verifySystemPrompt, user: userText, temperature: 0.15)
+            guard let data = content.data(using: .utf8),
+                  let out = try? JSONDecoder().decode(VerifyCorrectionsWrapper.self, from: data),
+                  out.exercises.count == exercises.count else {
+                return exercises
+            }
+            var result: [GrammarExercise] = []
+            for (orig, corr) in zip(exercises, out.exercises) {
+                if corr.drop == true { continue }
+                if orig.isOpenEnded { result.append(orig); continue }
+                var merged = orig
+                if let idx = corr.answerIndex { merged.answerIndex = idx }
+                if let a = corr.answer, !a.trimmingCharacters(in: .whitespaces).isEmpty { merged.answer = a }
+                if let o = corr.options, o.count >= 2 { merged.options = o }
+                if let w = corr.words, !w.isEmpty { merged.words = w }
+                if let e = corr.explanation, !e.trimmingCharacters(in: .whitespaces).isEmpty { merged.explanation = e }
+                if let clean = merged.sanitized() { result.append(clean) }
+            }
+            return result.isEmpty ? exercises : result
+        } catch {
+            return exercises
+        }
+    }
+
+    private struct VerifyExercisesWrapper: Encodable { let exercises: [GrammarExercise] }
+    private struct VerifyCorrectionsWrapper: Decodable { let exercises: [VerifyCorrection] }
+    private struct VerifyCorrection: Decodable {
+        let answerIndex: Int?
+        let answer: String?
+        let options: [String]?
+        let words: [String]?
+        let explanation: String?
+        let drop: Bool?
+    }
 
     // MARK: - Grading open-ended answers (Ex 9 & 10)
 
@@ -289,6 +374,22 @@ final class GrammarStore {
         persist()
     }
 
+    /// Records a spaced-repetition review outcome from an actual practice run.
+    /// A pass advances the interval stage (review further out); a fail steps the
+    /// stage back and re-schedules for tomorrow, so a shaky rule comes back soon.
+    func recordReview(passed: Bool, forSaved id: UUID) {
+        guard let i = lessons.firstIndex(where: { $0.id == id }) else { return }
+        if passed {
+            let next = min(lessons[i].reviewStage + 1, SavedGrammarLesson.intervals.count - 1)
+            lessons[i].reviewStage = next
+            lessons[i].nextReviewAt = SavedGrammarLesson.date(afterDays: SavedGrammarLesson.intervals[next])
+        } else {
+            lessons[i].reviewStage = max(0, lessons[i].reviewStage - 1)
+            lessons[i].nextReviewAt = SavedGrammarLesson.date(afterDays: 1)
+        }
+        persist()
+    }
+
     /// Marks a lesson reviewed: advances its spaced-repetition stage and schedules
     /// the next review.
     func markReviewed(id: UUID) {
@@ -339,5 +440,139 @@ final class GrammarStore {
         guard let data = try? Data(contentsOf: fileURL),
               let decoded = try? JSONDecoder().decode([SavedGrammarLesson].self, from: data) else { return }
         lessons = decoded
+    }
+}
+
+// MARK: - Mistakes bank store
+
+/// Persists grammar questions the learner got wrong so they can be re-drilled
+/// later (error-driven retrieval practice). Same JSON-file pattern as the other
+/// stores; newest first, deduped by question, capped so the file stays small.
+@Observable
+final class GrammarMistakeStore {
+    private(set) var entries: [GrammarMistakeEntry] = []
+
+    private let filename = "grammarMistakes.v1.json"
+    private let cap = 300
+
+    init() { load() }
+
+    var count: Int { entries.count }
+    var isEmpty: Bool { entries.isEmpty }
+
+    /// Records a missed question. If the same question is already banked, bumps
+    /// its miss count and moves it to the front instead of duplicating.
+    func record(pattern: String, sourceLabel: String, exercise: GrammarExercise, userAnswer: String = "") {
+        guard let clean = exercise.sanitized() else { return }
+        let entry = GrammarMistakeEntry(pattern: pattern, sourceLabel: sourceLabel,
+                                        exercise: clean, userAnswer: userAnswer)
+        if let i = entries.firstIndex(where: { $0.questionKey == entry.questionKey }) {
+            var bumped = entries.remove(at: i)
+            bumped.timesWrong += 1
+            bumped.date = .now
+            bumped.userAnswer = userAnswer
+            entries.insert(bumped, at: 0)
+        } else {
+            entries.insert(entry, at: 0)
+            if entries.count > cap { entries = Array(entries.prefix(cap)) }
+        }
+        persist()
+    }
+
+    /// Removes the banked entry for a question once it's finally answered right.
+    func resolve(_ exercise: GrammarExercise) {
+        let key = GrammarMistakeEntry(pattern: "", sourceLabel: "", exercise: exercise).questionKey
+        let before = entries.count
+        entries.removeAll { $0.questionKey == key }
+        if entries.count != before { persist() }
+    }
+
+    func remove(id: UUID) { entries.removeAll { $0.id == id }; persist() }
+    func remove(at offsets: IndexSet) { entries.remove(atOffsets: offsets); persist() }
+    func clear() { entries.removeAll(); persist() }
+
+    /// Missed exercises as a runnable practice set (newest first, fresh ids so
+    /// the runner resets state cleanly per question).
+    func practiceExercises(limit: Int = 20) -> [GrammarExercise] {
+        entries.prefix(limit).map { entry in
+            var ex = entry.exercise
+            ex.id = UUID()
+            return ex
+        }
+    }
+
+    /// Entries grouped by grammar pattern, each group keeping newest-first order.
+    var grouped: [(pattern: String, items: [GrammarMistakeEntry])] {
+        var order: [String] = []
+        var map: [String: [GrammarMistakeEntry]] = [:]
+        for e in entries {
+            let key = e.pattern.isEmpty ? "Khác" : e.pattern
+            if map[key] == nil { order.append(key) }
+            map[key, default: []].append(e)
+        }
+        return order.map { ($0, map[$0] ?? []) }
+    }
+
+    /// Replaces all entries (used when importing a backup) and persists.
+    func restore(_ entries: [GrammarMistakeEntry]) { self.entries = entries; persist() }
+
+    // MARK: Persistence
+
+    private var fileURL: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent(filename)
+    }
+
+    private func persist() {
+        if let data = try? JSONEncoder().encode(entries) {
+            try? data.write(to: fileURL, options: .atomic)
+        }
+    }
+
+    private func load() {
+        guard let data = try? Data(contentsOf: fileURL),
+              let decoded = try? JSONDecoder().decode([GrammarMistakeEntry].self, from: data) else { return }
+        entries = decoded
+    }
+}
+
+// MARK: - Lesson feedback store
+
+/// Small local log of the learner's lesson ratings. Negative feedback's reasons
+/// are fed back into regeneration to fix the specific complaint. Local-only
+/// (diagnostic) — not part of cross-device backup.
+@Observable
+final class GrammarFeedbackStore {
+    private(set) var entries: [GrammarLessonFeedback] = []
+
+    private let filename = "grammarFeedback.v1.json"
+
+    init() { load() }
+
+    func add(_ entry: GrammarLessonFeedback) {
+        entries.insert(entry, at: 0)
+        if entries.count > 200 { entries = Array(entries.prefix(200)) }
+        persist()
+    }
+
+    func clear() { entries.removeAll(); persist() }
+
+    private var fileURL: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent(filename)
+    }
+
+    private func persist() {
+        if let data = try? JSONEncoder().encode(entries) {
+            try? data.write(to: fileURL, options: .atomic)
+        }
+    }
+
+    private func load() {
+        guard let data = try? Data(contentsOf: fileURL),
+              let decoded = try? JSONDecoder().decode([GrammarLessonFeedback].self, from: data) else { return }
+        entries = decoded
     }
 }

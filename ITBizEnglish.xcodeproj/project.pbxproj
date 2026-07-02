@@ -40,6 +40,7 @@
 		AB9B5CEE9EFC7417589653CB /* LearningSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B25BE856113815AB154AED6D /* LearningSessionView.swift */; };
 		B39CD7A376740725B93E6F6D /* TagCapsule.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDD48273F2E65D302B58A5B2 /* TagCapsule.swift */; };
 		B401AF6E7D6DAD09CC9D9094 /* DeckGameView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E82ACA3F42538005C21F926B /* DeckGameView.swift */; };
+		PV01AABBCCDDEEFF00112233 /* DeckPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = PV02AABBCCDDEEFF00112233 /* DeckPreviewView.swift */; };
 		MG01AABBCCDDEEFF00112233 /* MatchGameView.swift in Sources */ = {isa = PBXBuildFile; fileRef = MG02AABBCCDDEEFF00112233 /* MatchGameView.swift */; };
 		SM01AABBCCDDEEFF00112233 /* SongModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = SM02AABBCCDDEEFF00112233 /* SongModels.swift */; };
 		IS01AABBCCDDEEFF00112233 /* ITunesSearchService.swift in Sources */ = {isa = PBXBuildFile; fileRef = IS02AABBCCDDEEFF00112233 /* ITunesSearchService.swift */; };
@@ -142,6 +143,7 @@
 		WB02AABBCCDDEEFF00112233 /* WordBankView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordBankView.swift; sourceTree = "<group>"; };
 		QL02AABBCCDDEEFF00112233 /* QuickLookupBubble.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookupBubble.swift; sourceTree = "<group>"; };
 		E82ACA3F42538005C21F926B /* DeckGameView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeckGameView.swift; sourceTree = "<group>"; };
+		PV02AABBCCDDEEFF00112233 /* DeckPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeckPreviewView.swift; sourceTree = "<group>"; };
 		MG02AABBCCDDEEFF00112233 /* MatchGameView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MatchGameView.swift; sourceTree = "<group>"; };
 		F227C836BD87A66770E8CCD1 /* DeckStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeckStore.swift; sourceTree = "<group>"; };
 		F2443DEA6E4DD37266893ACA /* PracticeStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeStore.swift; sourceTree = "<group>"; };
@@ -212,6 +214,7 @@
 			isa = PBXGroup;
 			children = (
 				E82ACA3F42538005C21F926B /* DeckGameView.swift */,
+				PV02AABBCCDDEEFF00112233 /* DeckPreviewView.swift */,
 				MG02AABBCCDDEEFF00112233 /* MatchGameView.swift */,
 				85347942A4E6049DF233AD89 /* DeckWordEditorView.swift */,
 				36769949C734A0A21E18A209 /* DecksHomeView.swift */,
@@ -530,6 +533,7 @@
 				QL01AABBCCDDEEFF00112233 /* QuickLookupBubble.swift in Sources */,
 				B39CD7A376740725B93E6F6D /* TagCapsule.swift in Sources */,
 				B401AF6E7D6DAD09CC9D9094 /* DeckGameView.swift in Sources */,
+				PV01AABBCCDDEEFF00112233 /* DeckPreviewView.swift in Sources */,
 				MG01AABBCCDDEEFF00112233 /* MatchGameView.swift in Sources */,
 				SM01AABBCCDDEEFF00112233 /* SongModels.swift in Sources */,
 				IS01AABBCCDDEEFF00112233 /* ITunesSearchService.swift in Sources */,

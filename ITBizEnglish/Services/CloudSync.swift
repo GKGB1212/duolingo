@@ -198,14 +198,16 @@ enum CloudSync {
     @MainActor
     static func upload(decks: DeckStore, practice: PracticeStore, chat: ChatHistoryStore,
                        flashcards: FlashcardStore, songs: SongLibraryStore,
-                       grammar: GrammarStore, settings: AppSettings) async throws {
+                       grammar: GrammarStore, grammarMistakes: GrammarMistakeStore,
+                       settings: AppSettings) async throws {
         guard CloudConfig.isConfigured else { throw CloudError.notConfigured }
         let token = try await CloudAuth.shared.validIDToken()
         guard let uid = CloudAuth.shared.uid, let project = CloudConfig.projectID else {
             throw CloudError.notSignedIn
         }
         let data = try BackupService.makeData(decks: decks, practice: practice, chat: chat,
-                                              flashcards: flashcards, songs: songs, grammar: grammar, settings: settings)
+                                              flashcards: flashcards, songs: songs, grammar: grammar,
+                                              grammarMistakes: grammarMistakes, settings: settings)
         let json = String(decoding: data, as: UTF8.self)
         let isoNow = ISO8601DateFormatter().string(from: .now)
         let payload: [String: Any] = [
@@ -231,7 +233,8 @@ enum CloudSync {
     @discardableResult
     static func download(decks: DeckStore, practice: PracticeStore, chat: ChatHistoryStore,
                          flashcards: FlashcardStore, songs: SongLibraryStore,
-                         grammar: GrammarStore, settings: AppSettings) async throws -> Bool {
+                         grammar: GrammarStore, grammarMistakes: GrammarMistakeStore,
+                         settings: AppSettings) async throws -> Bool {
         guard CloudConfig.isConfigured else { throw CloudError.notConfigured }
         let token = try await CloudAuth.shared.validIDToken()
         guard let uid = CloudAuth.shared.uid, let project = CloudConfig.projectID else {
@@ -247,7 +250,8 @@ enum CloudSync {
               let json = doc.fields?.backup?.stringValue,
               let blob = json.data(using: .utf8) else { throw CloudError.decoding }
         try BackupService.restore(data: blob, decks: decks, practice: practice, chat: chat,
-                                  flashcards: flashcards, songs: songs, grammar: grammar, settings: settings)
+                                  flashcards: flashcards, songs: songs, grammar: grammar,
+                                  grammarMistakes: grammarMistakes, settings: settings)
         return true
     }
 

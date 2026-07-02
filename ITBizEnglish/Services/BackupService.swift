@@ -33,6 +33,7 @@ struct BackupData: Codable {
     var savedSongs: [SongResult] = []
     var savedWords: [SavedWord] = []
     var grammarLessons: [SavedGrammarLesson] = []
+    var grammarMistakes: [GrammarMistakeEntry] = []
     var credentials: [APICredential] = []
 
     static let expectedFormat = "itbiz.backup"
@@ -42,7 +43,8 @@ struct BackupData: Codable {
     init(decks: [WordDeck], practiceSets: [PracticeSet], chatHistory: [ChatHistoryEntry],
          flashcards: [Flashcard], translationHistory: [TranslationResult],
          savedSongs: [SongResult], savedWords: [SavedWord],
-         grammarLessons: [SavedGrammarLesson], credentials: [APICredential]) {
+         grammarLessons: [SavedGrammarLesson], grammarMistakes: [GrammarMistakeEntry],
+         credentials: [APICredential]) {
         self.decks = decks
         self.practiceSets = practiceSets
         self.chatHistory = chatHistory
@@ -51,6 +53,7 @@ struct BackupData: Codable {
         self.savedSongs = savedSongs
         self.savedWords = savedWords
         self.grammarLessons = grammarLessons
+        self.grammarMistakes = grammarMistakes
         self.credentials = credentials
     }
 
@@ -67,6 +70,7 @@ struct BackupData: Codable {
         savedSongs = try c.decodeIfPresent([SongResult].self, forKey: .savedSongs) ?? []
         savedWords = try c.decodeIfPresent([SavedWord].self, forKey: .savedWords) ?? []
         grammarLessons = try c.decodeIfPresent([SavedGrammarLesson].self, forKey: .grammarLessons) ?? []
+        grammarMistakes = try c.decodeIfPresent([GrammarMistakeEntry].self, forKey: .grammarMistakes) ?? []
         credentials = try c.decodeIfPresent([APICredential].self, forKey: .credentials) ?? []
     }
 
@@ -79,6 +83,7 @@ struct BackupData: Codable {
         if !flashcards.isEmpty { parts.append("\(flashcards.count) thẻ dịch") }
         if !savedSongs.isEmpty { parts.append("\(savedSongs.count) bài hát") }
         if !grammarLessons.isEmpty { parts.append("\(grammarLessons.count) bài ngữ pháp") }
+        if !grammarMistakes.isEmpty { parts.append("\(grammarMistakes.count) lỗi ngữ pháp") }
         if !credentials.isEmpty { parts.append("\(credentials.count) API key") }
         return parts.isEmpty ? "trống" : parts.joined(separator: " · ")
     }
@@ -103,7 +108,8 @@ enum BackupService {
     /// Encodes a snapshot of all stores into pretty-printed JSON.
     static func makeData(decks: DeckStore, practice: PracticeStore, chat: ChatHistoryStore,
                          flashcards: FlashcardStore, songs: SongLibraryStore,
-                         grammar: GrammarStore, settings: AppSettings) throws -> Data {
+                         grammar: GrammarStore, grammarMistakes: GrammarMistakeStore,
+                         settings: AppSettings) throws -> Data {
         let backup = BackupData(
             decks: decks.decks,
             practiceSets: practice.sets,
@@ -113,6 +119,7 @@ enum BackupService {
             savedSongs: songs.savedSongs,
             savedWords: songs.savedWords,
             grammarLessons: grammar.lessons,
+            grammarMistakes: grammarMistakes.entries,
             credentials: settings.credentials
         )
         let encoder = JSONEncoder()
@@ -130,9 +137,11 @@ enum BackupService {
     /// Writes the backup to a temp file and returns its URL (for the share sheet).
     static func writeTempFile(decks: DeckStore, practice: PracticeStore, chat: ChatHistoryStore,
                               flashcards: FlashcardStore, songs: SongLibraryStore,
-                              grammar: GrammarStore, settings: AppSettings) throws -> URL {
+                              grammar: GrammarStore, grammarMistakes: GrammarMistakeStore,
+                              settings: AppSettings) throws -> URL {
         let data = try makeData(decks: decks, practice: practice, chat: chat,
-                                flashcards: flashcards, songs: songs, grammar: grammar, settings: settings)
+                                flashcards: flashcards, songs: songs, grammar: grammar,
+                                grammarMistakes: grammarMistakes, settings: settings)
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(suggestedFilename())
         try data.write(to: url, options: .atomic)
         return url
@@ -143,6 +152,7 @@ enum BackupService {
     static func restore(from url: URL, decks: DeckStore, practice: PracticeStore,
                         chat: ChatHistoryStore, flashcards: FlashcardStore,
                         songs: SongLibraryStore, grammar: GrammarStore,
+                        grammarMistakes: GrammarMistakeStore,
                         settings: AppSettings) throws -> BackupData {
         // Security-scoped access is needed for files picked from other apps (Files, iCloud).
         let scoped = url.startAccessingSecurityScopedResource()
@@ -150,7 +160,8 @@ enum BackupService {
 
         guard let data = try? Data(contentsOf: url) else { throw BackupError.readFailed }
         return try restore(data: data, decks: decks, practice: practice, chat: chat,
-                           flashcards: flashcards, songs: songs, grammar: grammar, settings: settings)
+                           flashcards: flashcards, songs: songs, grammar: grammar,
+                           grammarMistakes: grammarMistakes, settings: settings)
     }
 
     /// Decodes and applies a backup payload (file or cloud) to every store.
@@ -158,6 +169,7 @@ enum BackupService {
     static func restore(data: Data, decks: DeckStore, practice: PracticeStore,
                         chat: ChatHistoryStore, flashcards: FlashcardStore,
                         songs: SongLibraryStore, grammar: GrammarStore,
+                        grammarMistakes: GrammarMistakeStore,
                         settings: AppSettings) throws -> BackupData {
         let backup = try JSONDecoder().decode(BackupData.self, from: data)
         guard backup.format == BackupData.expectedFormat else { throw BackupError.invalidFile }
@@ -168,6 +180,7 @@ enum BackupService {
         flashcards.restore(flashcards: backup.flashcards, history: backup.translationHistory)
         songs.restore(songs: backup.savedSongs, words: backup.savedWords)
         grammar.restore(backup.grammarLessons)
+        grammarMistakes.restore(backup.grammarMistakes)
         settings.restore(credentials: backup.credentials)
         return backup
     }

@@ -232,6 +232,91 @@ struct GrammarExercise: Codable, Hashable, Identifiable {
 
     /// Short human label used on the exercise progress chrome.
     var kindLabel: String { kind.label }
+
+    // MARK: - Structural validation
+
+    /// Kinds that present tap-to-choose options graded by `answerIndex`.
+    var usesOptions: Bool {
+        switch kind {
+        case .multipleChoice, .fillBlank, .enToVi, .chooseBetter, .findMistake, .conversation:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Kinds where the learner arranges word tiles into `answer`.
+    var usesArrange: Bool {
+        switch kind {
+        case .wordOrder, .viToEn: return true
+        default: return false
+        }
+    }
+
+    /// Normalized, sorted word tokens — used to check that arrange tiles can
+    /// actually recompose the answer (order-independent multiset compare).
+    static func normalizedTokens(_ s: String) -> [String] {
+        s.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .sorted()
+    }
+
+    /// True when this exercise is well-formed enough to present AND auto-grade
+    /// correctly. (Equivalent to `sanitized() != nil`.)
+    var isStructurallyValid: Bool { sanitized() != nil }
+
+    /// Returns a cleaned copy that is safe to show, or `nil` if the item is
+    /// unsalvageable and should be dropped. This is the first line of defense
+    /// against malformed LLM output being presented as a graded question:
+    ///
+    /// - Any kind: must have a non-empty prompt.
+    /// - Option kinds: need ≥2 non-empty options and an `answerIndex` in range —
+    ///   otherwise the "correct" answer is unknown, so the item is dropped.
+    /// - Arrange kinds: need a non-empty `answer`; `words` are repaired so they
+    ///   truly recompose the answer (rebuilt from the answer when they don't),
+    ///   guaranteeing the tile puzzle is always solvable.
+    /// - Open-ended kinds: only need a prompt (the AI grades the free text).
+    func sanitized() -> GrammarExercise? {
+        let cleanPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanPrompt.isEmpty else { return nil }
+
+        var ex = self
+        ex.prompt = cleanPrompt
+
+        if isOpenEnded { return ex }
+
+        if usesOptions {
+            let opts = (options ?? [])
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            guard opts.count >= 2, let idx = answerIndex, opts.indices.contains(idx) else { return nil }
+            ex.options = opts
+            return ex
+        }
+
+        if usesArrange {
+            let ans = (answer ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !ans.isEmpty else { return nil }
+            ex.answer = ans
+            let provided = (words ?? [])
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            if provided.isEmpty || Self.normalizedTokens(provided.joined(separator: " ")) != Self.normalizedTokens(ans) {
+                ex.words = ans.split(separator: " ").map(String.init)   // rebuild solvable tiles
+            } else {
+                ex.words = provided
+            }
+            return ex
+        }
+
+        return ex
+    }
+}
+
+extension Array where Element == GrammarExercise {
+    /// Drops/repairs malformed exercises, preserving order.
+    func sanitized() -> [GrammarExercise] { compactMap { $0.sanitized() } }
 }
 
 struct GrammarSummary: Codable, Hashable {
@@ -399,4 +484,94 @@ struct GrammarRoute: Identifiable, Hashable {
     var lesson: GrammarLesson
     /// Set when opened from a saved lesson (so practice updates its score).
     var savedID: UUID? = nil
+}
+
+// MARK: - Mistakes bank
+
+/// One grammar question the learner got wrong, kept so it can be re-drilled
+/// later (error-driven retrieval practice). Stores the full, already-sanitized
+/// exercise so the review can render and grade it exactly like the first time.
+struct GrammarMistakeEntry: Codable, Identifiable, Hashable {
+    var id = UUID()
+    /// The grammar pattern the mistake came from (for grouping/display).
+    var pattern: String = ""
+    /// Where it happened, e.g. "Bài học", "IT / Lập trình" (the practice context).
+    var sourceLabel: String = ""
+    /// The missed exercise (sanitized), replayable in the review runner.
+    var exercise: GrammarExercise = GrammarExercise()
+    /// What the learner answered (for their reference), may be empty.
+    var userAnswer: String = ""
+    var date: Date = .now
+    /// How many times this exact question has been missed.
+    var timesWrong: Int = 1
+
+    enum CodingKeys: String, CodingKey {
+        case id, pattern, sourceLabel, exercise, userAnswer, date, timesWrong
+    }
+
+    init(id: UUID = UUID(), pattern: String, sourceLabel: String,
+         exercise: GrammarExercise, userAnswer: String = "",
+         date: Date = .now, timesWrong: Int = 1) {
+        self.id = id
+        self.pattern = pattern
+        self.sourceLabel = sourceLabel
+        self.exercise = exercise
+        self.userAnswer = userAnswer
+        self.date = date
+        self.timesWrong = timesWrong
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        pattern = try c.decodeIfPresent(String.self, forKey: .pattern) ?? ""
+        sourceLabel = try c.decodeIfPresent(String.self, forKey: .sourceLabel) ?? ""
+        exercise = try c.decodeIfPresent(GrammarExercise.self, forKey: .exercise) ?? GrammarExercise()
+        userAnswer = try c.decodeIfPresent(String.self, forKey: .userAnswer) ?? ""
+        date = try c.decodeIfPresent(Date.self, forKey: .date) ?? .now
+        timesWrong = try c.decodeIfPresent(Int.self, forKey: .timesWrong) ?? 1
+    }
+
+    /// Identity of the *question* (independent of pattern), used to dedupe and
+    /// to resolve an entry when the learner finally answers it correctly.
+    var questionKey: String {
+        (exercise.type + "␟" + exercise.prompt)
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// MARK: - Lesson feedback
+
+/// A learner's rating of a generated lesson. Negative feedback carries reasons
+/// that can be fed back into a regeneration to fix the specific complaint.
+struct GrammarLessonFeedback: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var pattern: String = ""
+    var positive: Bool = false
+    var reasons: [String] = []
+    var note: String = ""
+    var date: Date = .now
+
+    enum CodingKeys: String, CodingKey { case id, pattern, positive, reasons, note, date }
+
+    init(id: UUID = UUID(), pattern: String, positive: Bool,
+         reasons: [String] = [], note: String = "", date: Date = .now) {
+        self.id = id
+        self.pattern = pattern
+        self.positive = positive
+        self.reasons = reasons
+        self.note = note
+        self.date = date
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        pattern = try c.decodeIfPresent(String.self, forKey: .pattern) ?? ""
+        positive = try c.decodeIfPresent(Bool.self, forKey: .positive) ?? false
+        reasons = try c.decodeIfPresent([String].self, forKey: .reasons) ?? []
+        note = try c.decodeIfPresent(String.self, forKey: .note) ?? ""
+        date = try c.decodeIfPresent(Date.self, forKey: .date) ?? .now
+    }
 }

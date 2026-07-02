@@ -22,41 +22,70 @@ struct GrammarPracticeView: View {
     var savedID: UUID?
     /// Set when running a saved AI-generated exercise set (records its score).
     var setID: UUID? = nil
+    /// Collects wrong answers so they can be re-drilled later.
+    var mistakes: GrammarMistakeStore
+    /// True when this run IS the mistakes review (correct answers clear the bank).
+    var isMistakeReview: Bool = false
+    /// Where this practice came from — stored on any mistakes recorded here.
+    var sourceLabel: String = "Bài học"
 
     @Environment(\.dismiss) private var dismiss
 
+    // A working queue: starts as `exercises` and grows as missed items are
+    // requeued once (Duolingo-style) so the learner has to get them right.
+    @State private var queue: [GrammarExercise] = []
+    @State private var started = false
     @State private var index = 0
-    @State private var creditSum = 0.0     // 0…count, fractional for AI-graded items
     @State private var finished = false
     @State private var localSavedID: UUID?
+    @State private var didAutoReview = false
+
+    // Maps a requeued copy's id → its original exercise id, so scoring counts
+    // each original question once (on its first attempt).
+    @State private var originMap: [UUID: UUID] = [:]
+    @State private var requeued: Set<UUID> = []
+    @State private var firstTry: [UUID: Double] = [:]
+
+    /// The original number of questions (excludes requeued repeats).
+    private var originalCount: Int { exercises.count }
+
     private var progress: Double {
-        exercises.isEmpty ? 1 : Double(index) / Double(exercises.count)
+        if finished { return 1 }
+        guard started, !queue.isEmpty else { return 0 }
+        return Double(index) / Double(queue.count)
     }
     private var finalScore: Int {
-        exercises.isEmpty ? 0 : Int((creditSum / Double(exercises.count) * 100).rounded())
+        guard originalCount > 0 else { return 0 }
+        let sum = firstTry.values.reduce(0, +)
+        return Int((sum / Double(originalCount) * 100).rounded())
     }
 
     var body: some View {
         ZStack {
             AppBackground()
-            if finished || exercises.isEmpty {
+            if exercises.isEmpty || finished {
                 finishView
-            } else {
+            } else if started, index < queue.count {
                 VStack(spacing: Theme.Spacing.sm) {
                     header
                     GrammarExerciseView(
-                        exercise: exercises[index],
+                        exercise: queue[index],
                         pattern: route.pattern,
-                        onNext: { credit in advance(credit) }
+                        onNext: { grade in advance(grade) }
                     )
-                    .id(exercises[index].id)   // fresh state per question
+                    .id(queue[index].id)   // fresh state per question
                 }
+            } else {
+                Color.clear
             }
         }
         .navigationTitle("Luyện tập")
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)
-        .onAppear { localSavedID = savedID }
+        .onAppear {
+            localSavedID = savedID
+            if !started { queue = exercises; started = true }
+        }
     }
 
     private var header: some View {
@@ -65,17 +94,41 @@ struct GrammarPracticeView: View {
                 Image(systemName: "xmark").font(.title3.weight(.bold)).foregroundStyle(.duoHare)
             }
             DuoProgressBar(value: progress, tint: .brand)
-            Text("\(min(index + 1, exercises.count))/\(exercises.count)")
+            Text("\(min(index + 1, max(queue.count, 1)))/\(max(queue.count, 1))")
                 .font(.caption.weight(.heavy).monospacedDigit()).foregroundStyle(.duoWolf)
         }
         .padding(.horizontal, Theme.Spacing.md)
         .padding(.top, Theme.Spacing.sm)
     }
 
-    private func advance(_ credit: Double) {
-        creditSum += max(0, min(1, credit))
+    private func advance(_ grade: GrammarGrade) {
+        guard index < queue.count else { return }
+        let current = queue[index]
+        let originID = originMap[current.id] ?? current.id
+
+        // Score each original question by its FIRST attempt only.
+        if firstTry[originID] == nil { firstTry[originID] = max(0, min(1, grade.credit)) }
+
+        if grade.passed {
+            // Answering a banked question correctly during its review clears it.
+            if isMistakeReview { mistakes.resolve(current) }
+        } else {
+            // Bank the miss for later spaced re-drilling…
+            mistakes.record(pattern: route.pattern, sourceLabel: sourceLabel,
+                            exercise: current, userAnswer: grade.answer)
+            // …and requeue it once, a few steps later, so it comes back now too.
+            if !requeued.contains(originID) {
+                requeued.insert(originID)
+                var copy = current
+                copy.id = UUID()
+                originMap[copy.id] = originID
+                let insertAt = min(queue.count, index + 3)
+                queue.insert(copy, at: insertAt)
+            }
+        }
+
         withAnimation {
-            if index + 1 >= exercises.count { finished = true }
+            if index + 1 >= queue.count { finished = true }
             else { index += 1 }
         }
     }
@@ -99,9 +152,12 @@ struct GrammarPracticeView: View {
                 }
                 .padding(.top, Theme.Spacing.md)
 
-                GrammarSummaryCard(pattern: route.pattern, summary: route.lesson.summary)
-
-                reviewPlanCard
+                if isMistakeReview {
+                    mistakeReviewCard
+                } else {
+                    GrammarSummaryCard(pattern: route.pattern, summary: route.lesson.summary)
+                    reviewPlanCard
+                }
 
                 Button("Xong") { dismiss() }
                     .buttonStyle(.duo(.duoGreen, edge: .duoGreenEdge))
@@ -113,8 +169,33 @@ struct GrammarPracticeView: View {
             if let id = localSavedID {
                 store.recordScore(finalScore, forSaved: id)
                 if let sid = setID { store.recordExerciseSetScore(finalScore, setID: sid, inSaved: id) }
+                // Auto-advance spaced repetition when a DUE lesson was practiced.
+                if let saved = store.saved(id: id), saved.isDue {
+                    store.recordReview(passed: finalScore >= 60, forSaved: id)
+                    didAutoReview = true
+                }
             }
         }
+    }
+
+    private var mistakeReviewCard: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            HStack(spacing: Theme.Spacing.sm) {
+                Image(systemName: "checklist")
+                    .font(.subheadline.weight(.bold)).foregroundStyle(.white)
+                    .frame(width: 30, height: 30)
+                    .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.duoGreen))
+                Text("Ôn lỗi sai").font(.headline.weight(.heavy)).foregroundStyle(.duoInk)
+                Spacer()
+            }
+            Text("Những câu bạn trả lời đúng đã được gỡ khỏi danh sách lỗi. Câu nào còn sai sẽ được giữ lại để ôn tiếp.")
+                .font(.caption.weight(.medium)).foregroundStyle(.duoWolf)
+            Label("Còn \(mistakes.count) câu cần ôn", systemImage: "tray.full.fill")
+                .font(.subheadline.weight(.bold)).foregroundStyle(mistakes.isEmpty ? .duoGreen : .duoIndigo)
+        }
+        .padding(Theme.Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .duoCard(cornerRadius: Theme.Radius.card)
     }
 
     // MARK: - Spaced-repetition review plan
@@ -143,13 +224,19 @@ struct GrammarPracticeView: View {
             if let saved {
                 Label(saved.nextReviewLabel, systemImage: "checkmark.circle.fill")
                     .font(.subheadline.weight(.bold)).foregroundStyle(.duoGreen)
-                Button {
-                    Haptics.tap()
-                    store.markReviewed(id: saved.id)
-                } label: {
-                    Label("Đã ôn xong — lên lịch lần sau", systemImage: "arrow.clockwise")
+                if didAutoReview {
+                    // Practicing a due lesson already advanced the schedule.
+                    Label("Đã cập nhật lịch ôn tự động", systemImage: "sparkles")
+                        .font(.subheadline.weight(.bold)).foregroundStyle(.duoIndigo)
+                } else {
+                    Button {
+                        Haptics.tap()
+                        store.markReviewed(id: saved.id)
+                    } label: {
+                        Label("Đã ôn xong — lên lịch lần sau", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.duo(.duoIndigo, edge: .duoIndigoEdge))
                 }
-                .buttonStyle(.duo(.duoIndigo, edge: .duoIndigoEdge))
             } else {
                 Button {
                     Haptics.tap()
@@ -183,13 +270,21 @@ struct GrammarPracticeView: View {
 
 // MARK: - One exercise
 
+/// Result of answering one exercise, passed up to the runner so it can score,
+/// requeue misses, and bank mistakes.
+struct GrammarGrade {
+    let credit: Double   // 0…1
+    let passed: Bool
+    let answer: String   // what the learner submitted (for the mistakes bank)
+}
+
 /// Renders a single exercise of any kind, owns its own answer state, and shows
-/// the check / feedback / continue chrome. Calls `onNext` with a 0…1 credit when
-/// the learner moves on.
+/// the check / feedback / continue chrome. Calls `onNext` with a `GrammarGrade`
+/// when the learner moves on.
 private struct GrammarExerciseView: View {
     let exercise: GrammarExercise
     let pattern: String
-    let onNext: (Double) -> Void
+    let onNext: (GrammarGrade) -> Void
 
     @State private var speech = SpeechSynthesizer()
 
@@ -407,11 +502,16 @@ private struct GrammarExerciseView: View {
                 .buttonStyle(.duoPrimary(enabled: canCheckOpen && !checking))
                 .disabled(!canCheckOpen || checking)
             } else {
-                Button("Tiếp tục") { onNext((Double(feedback?.score ?? 0)) / 100) }
+                Button("Tiếp tục") {
+                    let s = feedback?.score ?? 0
+                    onNext(GrammarGrade(credit: Double(s) / 100, passed: s >= 60, answer: openAnswerText))
+                }
                     .buttonStyle(.duo(.duoGreen, edge: .duoGreenEdge))
             }
         } else if graded {
-            Button(isCorrect ? "Tiếp tục" : "Đã hiểu") { onNext(isCorrect ? 1 : 0) }
+            Button(isCorrect ? "Tiếp tục" : "Đã hiểu") {
+                onNext(GrammarGrade(credit: isCorrect ? 1 : 0, passed: isCorrect, answer: answerText))
+            }
                 .buttonStyle(isCorrect ? .duo(.duoGreen, edge: .duoGreenEdge) : .duo(.duoRed, edge: .duoRedEdge))
         } else {
             Button("Kiểm tra") { gradeAuto() }
@@ -478,6 +578,23 @@ private struct GrammarExerciseView: View {
         case .miniChallenge:  return lines.contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty } && AppConfiguration.hasGeminiKey
         default:              return false
         }
+    }
+
+    /// What the learner submitted for an objective item (for the mistakes bank).
+    private var answerText: String {
+        switch exercise.kind {
+        case .wordOrder, .viToEn:
+            return chosen.map(\.text).joined(separator: " ")
+        default:
+            return selected.flatMap { exercise.options?[safe: $0] } ?? ""
+        }
+    }
+
+    /// What the learner wrote for an open-ended item.
+    private var openAnswerText: String {
+        exercise.kind == .miniChallenge
+            ? lines.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.joined(separator: " / ")
+            : attempt.trimmingCharacters(in: .whitespaces)
     }
 
     private var correctAnswerText: String? {
